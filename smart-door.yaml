@@ -1,0 +1,329 @@
+substitutions:
+  name: smart-chicken-door
+  device_description: "Inteligente Hühnertür"
+esphome:
+  name: ${name}
+  comment: ${device_description}
+  project:
+    name: "rfdarter.smart-chicken-door"
+    version: 1.0.0
+
+esp32:
+  board: wemos_d1_mini32
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "esphome-jk-bms-fallback"
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+
+web_server:
+  version: 3
+  js_url: https://deploy-preview-84--esphome-webserver.netlify.app/v3/www.js
+
+captive_portal:
+
+datetime:
+  - platform: template
+    id: time_to_open_the_door
+    type: time
+    name: Zeit wann die Tür geschlossen wird
+    entity_category: config
+    optimistic: yes
+    initial_value: "21:30:30"
+    restore_value: true
+    time_id: sntp_time
+    on_time:
+      - logger.log: "Zeit die Tür zu schließen. Hier muss geprüft werden ob alle drin sind und dann die tür schließen"
+
+  - platform: template
+    id: time_to_close_the_door
+    type: time
+    name: Zeit wann die Tür geöffnet wird
+    entity_category: config
+    optimistic: yes
+    initial_value: "05:30:15"
+    restore_value: true
+    time_id: sntp_time
+    on_time:
+      - logger.log: "Tür wird geöffnet"
+
+sensor:
+  - platform: template
+    id: chicken_in_coop_count
+    name: "Anzahl Hühner aktuell im Stall"
+
+  - platform: template
+    id: step
+    name: "In welchem Schritt befinden wir uns?"
+
+binary_sensor:
+  - platform: template
+    id: chicken_going_out
+    name: "Geht ein Huhn gerade nach draußen?"
+
+  - platform: template
+    id: chicken_going_in
+    name: "Geht ein Huhn gerade nach drinnen?"
+
+  - platform: gpio
+    pin:
+      number: GPIO18
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Innere Lichtschranke"
+    id: innere_lichtschranke
+    on_state:
+      then:
+        - script.execute: check_chicken_going_out
+        - script.execute: check_chicken_going_in
+
+  - platform: gpio
+    pin:
+      number: GPIO19
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Äussere Lichtschranke"
+    id: aussere_lichtschranke
+    on_state:
+      then:
+        - script.execute: check_chicken_going_out
+        - script.execute: check_chicken_going_in
+number:
+  - platform: template
+    name: Anzahl Hühner
+    id: Anzahl_Huehner
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 1
+    mode: slider
+    optimistic: True
+    initial_value: 7
+    on_value:
+      then:
+        lambda: id(chicken_in_coop_count).publish_state(x);
+
+http_request:
+  useragent: esphome/device
+  timeout: 10s
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: GMT-2
+
+button:
+  - platform: template
+    name: "+1 Huhn im Stall"
+    entity_category: config
+    on_press:
+      - lambda: id(chicken_in_coop_count).publish_state( id(chicken_in_coop_count).state + 1 );
+
+  - platform: template
+    name: "-1 Huhn im Stall"
+    entity_category: config
+    on_press:
+      - lambda: id(chicken_in_coop_count).publish_state( id(chicken_in_coop_count).state - 1 );
+
+  - platform: template
+    name: "Es sind alle Hühner drin!"
+    entity_category: config
+    on_press:
+      - lambda: id(chicken_in_coop_count).publish_state(id(Anzahl_Huehner).state);
+
+  - platform: template
+    name: "HTTP-Request Test"
+    entity_category: config
+    on_press:
+      - http_request.post:
+          url: https://ntfy.sh/weilex
+          verify_ssl: false
+          headers:
+            Content-Type: text/plain;charset=UTF-8
+          body: "Test"
+
+  - platform: template
+    entity_category: config
+    name: "Check ob alle im Stall sind"
+    on_press:
+      - script.execute: check_chicken_in_coop
+
+script:
+  - id: check_chicken_in_coop
+    then:
+      - if:
+          condition:
+            - lambda: return id(chicken_in_coop_count).state != id(Anzahl_Huehner).state;
+          then:
+            http_request.post:
+              url: https://ntfy.sh/weilex
+              verify_ssl: false
+              headers:
+                Content-Type: text/plain;charset=UTF-8
+              body: "Nicht alle Huehner im Stall"
+          else:
+            - http_request.post:
+                url: https://ntfy.sh/weilex
+                verify_ssl: false
+                headers:
+                  Content-Type: text/plain;charset=UTF-8
+                body: "Alle Huehner im Stall"
+
+  - id: reset
+    then:
+      - lambda: |-
+          id(chicken_going_out).publish_state(false);
+          id(chicken_going_in).publish_state(false);
+          id(step).publish_state(0);
+
+  - id: check_chicken_going_out
+    then:
+      - if: # überprüfe ob innere Lichtschranke == 1 und äußere Lichtschranke == 0 und chicken_going_in == 0 und setze chicken_going_out auf 1 und step auf 1
+          condition:
+            and:
+              - binary_sensor.is_on: innere_lichtschranke
+              - binary_sensor.is_off: aussere_lichtschranke
+              - lambda: return id(chicken_going_in).state == 0;
+          then:
+            - lambda: |-
+                id(chicken_going_out).publish_state(true);
+                id(step).publish_state(1);
+            - script.stop: check_chicken_going_out
+
+      - if: # Alle überprüfunen nur durchfuhren wenn chicken_going_out == 1
+          condition:
+            - lambda: return id(chicken_going_out).state == 1;
+          then:
+            - if: # step 1
+                condition:
+                  - lambda: return id(step).state == 1;
+                then:
+                  - if:
+                      condition:
+                        and:
+                          - binary_sensor.is_on: innere_lichtschranke
+                          - binary_sensor.is_on: aussere_lichtschranke
+                      then: # wenn beide == 1 - nächster step
+                        - lambda: id(step).publish_state(2);
+                        - script.stop: check_chicken_going_out
+                      else: # wenn nicht beide == 1 - abbruch
+                        script.execute: reset
+            - if: # step 2
+                condition:
+                  - lambda: return id(step).state == 2;
+                then:
+                  - if:
+                      condition:
+                        and:
+                          - binary_sensor.is_off: innere_lichtschranke
+                          - binary_sensor.is_on: aussere_lichtschranke
+                      then: # wenn innere == 0 und äußere == 1 - nächster step
+                        - lambda: id(step).publish_state(3);
+                        - script.stop: check_chicken_going_out
+                      else: # wenn nicht innere == 0 und äußere == 1 - abbruch
+                        script.execute: reset
+            - if: # step 3
+                condition:
+                  - lambda: return id(step).state == 3;
+                then:
+                  - if:
+                      condition:
+                        and:
+                          - binary_sensor.is_off: innere_lichtschranke
+                          - binary_sensor.is_off: aussere_lichtschranke
+                      then: # wenn beide == 0 - Huhn erfolreich nach draußen
+                        - lambda: id(chicken_in_coop_count).publish_state( id(chicken_in_coop_count).state - 1 );
+                        - script.execute: reset
+                      else: # wenn nicht beide == 0 - zurück zu step 2
+                        - if:
+                            condition:
+                              and:
+                                - binary_sensor.is_on: innere_lichtschranke
+                                - binary_sensor.is_on: aussere_lichtschranke
+                            then: # wenn beide == 1 - nächster step
+                              - lambda: id(step).publish_state(2);
+                              - script.stop: check_chicken_going_out
+                            else: # wenn nicht beide == 1 - abbruch
+                              script.execute: reset
+
+  - id: check_chicken_going_in
+    then:
+      - if: # überprüfe ob innere Lichtschranke == 0 und äußere Lichtschranke == 1 und chicken_going_out == 0 und setze chicken_going_in auf 1 und step auf 1
+          condition:
+            and:
+              - binary_sensor.is_off: innere_lichtschranke
+              - binary_sensor.is_on: aussere_lichtschranke
+              - lambda: return id(chicken_going_out).state == 0;
+          then:
+            - lambda: |-
+                id(chicken_going_in).publish_state(true);
+                id(step).publish_state(1);
+            - script.stop: check_chicken_going_in
+
+      - if: # Alle überprüfunen nur durchfuhren wenn chicken_going_in == 1
+          condition:
+            - lambda: return id(chicken_going_in).state == 1;
+          then:
+            - if: # step 1
+                condition:
+                  - lambda: return id(step).state == 1;
+                then:
+                  - if:
+                      condition:
+                        and:
+                          - binary_sensor.is_on: innere_lichtschranke
+                          - binary_sensor.is_on: aussere_lichtschranke
+                      then: # wenn beide == 1 - nächster step
+                        - lambda: id(step).publish_state(2);
+                        - script.stop: check_chicken_going_in
+                      else: # wenn nicht beide == 1 - abbruch
+                        script.execute: reset
+            - if: # step 2
+                condition:
+                  - lambda: return id(step).state == 2;
+                then:
+                  - if:
+                      condition:
+                        and:
+                          - binary_sensor.is_on: innere_lichtschranke
+                          - binary_sensor.is_off: aussere_lichtschranke
+                      then: # wenn innere == 1 und äußere == 0 - nächster step
+                        - lambda: id(step).publish_state(3);
+                        - script.stop: check_chicken_going_in
+                      else: # wenn nicht innere == 1 und äußere == 0 - abbruch
+                        script.execute: reset
+            - if: # step 3
+                condition:
+                  - lambda: return id(step).state == 3;
+                then:
+                  - if:
+                      condition:
+                        and:
+                          - binary_sensor.is_off: innere_lichtschranke
+                          - binary_sensor.is_off: aussere_lichtschranke
+                      then: # wenn beide == 0 - Huhn erfolreich nach drinnen
+                        - lambda: id(chicken_in_coop_count).publish_state( id(chicken_in_coop_count).state + 1 );
+                        - script.execute: reset
+                      else: # wenn nicht beide == 0 - zurück zu step 2
+                        - if:
+                            condition:
+                              and:
+                                - binary_sensor.is_on: innere_lichtschranke
+                                - binary_sensor.is_on: aussere_lichtschranke
+                            then: # wenn beide == 1 - nächster step
+                              - lambda: id(step).publish_state(2);
+                              - script.stop: check_chicken_going_in
+                            else: # wenn nicht beide == 1 - abbruch
+                              script.execute: reset
